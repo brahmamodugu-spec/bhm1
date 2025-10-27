@@ -1,19 +1,26 @@
 # app.py
 # 🧬 Sir Brahmam Labs — DNA QC & Reflective Symmetry (BDNT) Pro+
 # Elegant UI, live theme, STATIC photo (NO DNA overlay), QR code, mirror map,
-# PDF + JSON report, FASTA streaming with strict 200MB limit, optional FASTQ quality, simple login.
+# JSON report always; PDF report only if ReportLab is available.
+# FASTA streaming with strict 200MB cap; optional FASTQ quality; simple login.
 
 import io, os, re, json, math, gzip, mmap, tempfile, base64, datetime
 from typing import Optional, Tuple, Iterable, List
 
 import streamlit as st
 from PIL import Image
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4   # ✅ fix: missing import
 import qrcode
 import matplotlib.pyplot as plt
+
+# ---------- Try ReportLab; fall back cleanly if missing ----------
+REPORTLAB_OK = True
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+except Exception:
+    REPORTLAB_OK = False
 
 # ======================
 # Limits & Defaults
@@ -145,11 +152,10 @@ def parse_fasta_to_tempfile(upload, max_bytes: int = MAX_FILE_BYTES) -> Tuple[st
             if line.startswith(">"):
                 continue
             s = clean_line(line)
-            if not s: 
+            if not s:
                 continue
             b = s.encode("ascii")
             if max_bytes is not None and written + len(b) > max_bytes:
-                # stop exactly at limit
                 remain = max(0, max_bytes - written)
                 if remain > 0:
                     tf.write(b[:remain])
@@ -235,7 +241,6 @@ def reflective_equilibrium_small(temp_path: str, length: int) -> Tuple[Optional[
     return pal10, pal4
 
 def parse_fastq_quality(upload) -> Tuple[Optional[float], Optional[float]]:
-    # (size guard handled before calling)
     upload.seek(0)
     state=0; seq_len=0
     total_q=0; total_bases=0; total_q30=0
@@ -260,7 +265,7 @@ def parse_fastq_quality(upload) -> Tuple[Optional[float], Optional[float]]:
     return total_q/total_bases, total_q30/total_bases
 
 # ======================
-# Mirror Map (heatline) — sampling to handle huge files
+# Mirror Map (heatline)
 # ======================
 def mirror_match_series(temp_path: str, length: int, sample_points: int = 5000) -> List[int]:
     if length == 0: return []
@@ -289,70 +294,76 @@ def plot_mirror_heatline(series: List[int], title: str = "Mirror Map (1=match, 0
     plt.close()
 
 # ======================
-# PDF Report
+# PDF Report (only if ReportLab is available)
 # ======================
-def make_pdf_bytes(analysis: dict, img: Optional[Image.Image], primary_hex: str) -> bytes:
-    buf = io.BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    W,H = A4
-    margin=40
+if REPORTLAB_OK:
+    def make_pdf_bytes(analysis: dict, img: Optional[Image.Image], primary_hex: str) -> bytes:
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=A4)
+        W,H = A4
+        margin=40
 
-    rgb = tuple(int(primary_hex.lstrip("#")[i:i+2],16)/255 for i in (0,2,4))
-    c.setFillColorRGB(*rgb)
-    c.rect(0, H-80, W, 80, stroke=0, fill=1)
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 20)
-    c.drawString(margin, H-50, f"{analysis.get('brand', DEFAULT_BRAND)} — DNA QC & BDNT Report")
-    c.setFont("Helvetica", 11)
-    c.drawString(margin, H-66, f"{analysis.get('tagline', DEFAULT_TAGLINE)}")
+        rgb = tuple(int(primary_hex.lstrip("#")[i:i+2],16)/255 for i in (0,2,4))
+        c.setFillColorRGB(*rgb)
+        c.rect(0, H-80, W, 80, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 20)
+        c.drawString(margin, H-50, f"{analysis.get('brand', DEFAULT_BRAND)} — DNA QC & BDNT Report")
+        c.setFont("Helvetica", 11)
+        c.drawString(margin, H-66, f"{analysis.get('tagline', DEFAULT_TAGLINE)}")
 
-    if img is not None:
-        img2 = img.copy(); img2.thumbnail((100,100))
-        c.drawImage(ImageReader(img2), W-margin-100, H-110, width=90, height=90, mask='auto')
+        if img is not None:
+            img2 = img.copy(); img2.thumbnail((100,100))
+            c.drawImage(ImageReader(img2), W-margin-100, H-110, width=90, height=90, mask='auto')
 
-    y = H - 110 - margin
-    c.setFillColor(colors.black)
+        y = H - 110 - margin
+        c.setFillColorRGB(0,0,0)
 
-    def line(text, size=12, bold=False, color=colors.black, gap=16):
-        nonlocal y
-        c.setFillColor(color)
-        c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
-        c.drawString(margin, y, text)
-        y -= gap
-        c.setFillColor(colors.black)
+        def line(text, size=12, bold=False, color=None, gap=16):
+            nonlocal y
+            if color is not None:
+                c.setFillColor(color)
+            else:
+                c.setFillColorRGB(0,0,0)
+            c.setFont("Helvetica-Bold" if bold else "Helvetica", size)
+            c.drawString(margin, y, text)
+            y -= gap
 
-    line(f"Institute/Brand: {analysis.get('org','')}", 11)
-    line(f"Lead: {analysis.get('person','')}", 11)
-    line(f"Contact: {analysis.get('phone','')} | {analysis.get('email','')}", 11)
-    line(f"Website: {analysis.get('website','')}", 11)
-    line(f"Report Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", 11, gap=22)
+        line(f"Institute/Brand: {analysis.get('org','')}", 11)
+        line(f"Lead: {analysis.get('person','')}", 11)
+        line(f"Contact: {analysis.get('phone','')} | {analysis.get('email','')}", 11)
+        line(f"Website: {analysis.get('website','')}", 11)
+        line(f"Report Date: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}", 11, gap=22)
 
-    line("Results", 14, bold=True, color=colors.HexColor(primary_hex), gap=18)
-    line(f"Length (bp): {analysis['length_bp']}")
-    line(f"GC%: {analysis['GC_percent']}")
-    line(f"N%: {analysis['N_percent']}")
-    line(f"Shannon entropy (bits): {analysis['entropy_bits']}")
-    line(f"Longest homopolymer: {analysis['longest_homopolymer']}")
-    line(f"Reflective Equilibrium base-10: {analysis['reflective_equilibrium_base10']}")
-    line(f"Reflective Equilibrium base-4: {analysis['reflective_equilibrium_base4']}")
-    line(f"RDI (0 good → 1 bad): {analysis['RDI']}")
-    if analysis.get("mean_phred_Q") is not None:
-        line(f"Mean Phred Q (FASTQ): {analysis['mean_phred_Q']}")
-    if analysis.get("frac_Q30") is not None:
-        line(f"% bases ≥ Q30 (FASTQ): {round(analysis['frac_Q30']*100,2)}%")
+        line("Results", 14, bold=True, color=colors.HexColor(primary_hex), gap=18)
+        line(f"Length (bp): {analysis['length_bp']}")
+        line(f"GC%: {analysis['GC_percent']}")
+        line(f"N%: {analysis['N_percent']}")
+        line(f"Shannon entropy (bits): {analysis['entropy_bits']}")
+        line(f"Longest homopolymer: {analysis['longest_homopolymer']}")
+        line(f"Reflective Equilibrium base-10: {analysis['reflective_equilibrium_base10']}")
+        line(f"Reflective Equilibrium base-4: {analysis['reflective_equilibrium_base4']}")
+        line(f"RDI (0 good → 1 bad): {analysis['RDI']}")
+        if analysis.get("mean_phred_Q") is not None:
+            line(f"Mean Phred Q (FASTQ): {analysis['mean_phred_Q']}")
+        if analysis.get("frac_Q30") is not None:
+            line(f"% bases ≥ Q30 (FASTQ): {round(analysis['frac_Q30']*100,2)}%")
 
-    y -= 10
-    c.setFillColor(colors.HexColor("#444444"))
-    text = ("This report is for education/research demonstration. "
-            "It does not diagnose disease. For clinical decisions, use validated "
-            "variant-calling pipelines and ACMG interpretation.")
-    c.setFont("Helvetica-Oblique", 10)
-    for linewrap in [text[i:i+95] for i in range(0,len(text),95)]:
-        c.drawString(margin, y, linewrap); y -= 12
+        y -= 10
+        c.setFillColorRGB(0.27,0.27,0.27)
+        text = ("This report is for education/research demonstration. "
+                "It does not diagnose disease. For clinical decisions, use validated "
+                "variant-calling pipelines and ACMG interpretation.")
+        c.setFont("Helvetica-Oblique", 10)
+        for linewrap in [text[i:i+95] for i in range(0,len(text),95)]:
+            c.drawString(margin, y, linewrap); y -= 12
 
-    c.showPage(); c.save()
-    buf.seek(0)
-    return buf.getvalue()
+        c.showPage(); c.save()
+        buf.seek(0)
+        return buf.getvalue()
+else:
+    def make_pdf_bytes(*_, **__):
+        raise RuntimeError("ReportLab not installed")
 
 # ======================
 # App Init & Theme
@@ -400,8 +411,6 @@ st.write("")
 # ======================
 with st.sidebar:
     st.markdown("### 👨‍🏫 Your Profile")
-
-    # STATIC Photo (no DNA image)
     photo64 = img_to_base64("brand_photo.jpg")
     if photo64:
         st.markdown(
@@ -418,7 +427,7 @@ with st.sidebar:
         up_photo = st.file_uploader("Upload your photo (JPG/PNG)", type=["jpg","jpeg","png"])
         if up_photo is not None:
             img = Image.open(up_photo).convert("RGB")
-            img.save("brand_photo.jpg")  # persist for future runs
+            img.save("brand_photo.jpg")
             st.success("Saved as brand_photo.jpg. Reload the page to see your photo.")
 
     st.markdown("### 🏷️ Business Info")
@@ -456,10 +465,10 @@ with tab_home:
   <p><b>{brand}</b> blends mathematics and genomics to offer an educational view of DNA integrity and reflective symmetry (BDNT).</p>
   <ul>
     <li>Plain-English results everyone can understand</li>
-    <li>Handles FASTA files via streaming (≤ {MAX_FILE_MB} MB)</li>
+    <li>Handles FASTA via streaming (≤ {MAX_FILE_MB} MB cap)</li>
     <li>Mirror map visualization (mismatch heatline)</li>
-    <li>PDF & JSON <b>report downloads</b></li>
-    <li>Your <b>branding, colors & photo</b></li>
+    <li>JSON report download; PDF export if ReportLab available</li>
+    <li>Your branding, colors & photo</li>
   </ul>
   <a class="cta-btn" href="#dna-analysis">Start DNA Analysis</a>
 </div>
@@ -484,13 +493,13 @@ with tab_analyze:
             type=["fastq","fq","gz"]
         )
 
-    # Hard size check (Streamlit provides .size in bytes)
+    # Size check
     def _reject_if_too_big(f, label):
         if f is None:
             return False
         size = getattr(f, "size", None)
         if size is not None and size > MAX_FILE_BYTES:
-            st.error(f"{label} is {size/1024/1024:.1f} MB, which exceeds the {MAX_FILE_MB} MB limit.")
+            st.error(f"{label} is {size/1024/1024:.1f} MB, exceeding the {MAX_FILE_MB} MB limit.")
             return True
         return False
 
@@ -651,8 +660,8 @@ with tab_analyze:
 
 # REPORT
 with tab_report:
-    st.markdown(f"""<div class="card"><h3><span class="emoji">📄</span> Full Report</h3>""", unsafe_allow_html=True)
-    st.caption("Generate branded PDF + JSON after you run an analysis.")
+    st.markdown(f"""<div class="card"><h3><span class="emoji">📄</span> Report</h3>""", unsafe_allow_html=True)
+    st.caption("Generate downloads after you run an analysis.")
     if "analysis" not in st.session_state:
         st.warning("Run an analysis first (see the DNA Analysis tab).")
     else:
@@ -666,14 +675,18 @@ with tab_report:
             mime="application/json"
         )
 
-        # PDF
-        img_for_pdf = None
-        if os.path.exists("brand_photo.jpg"):
-            img_for_pdf = Image.open("brand_photo.jpg")
-
-        if st.button("🧾 Generate PDF"):
-            pdf_bytes = make_pdf_bytes(data, img_for_pdf, PRIMARY)
-            st.download_button("⬇️ Download PDF Report", data=pdf_bytes, file_name="dna_report.pdf", mime="application/pdf")
+        # PDF (only if ReportLab present)
+        if REPORTLAB_OK:
+            img_for_pdf = None
+            if os.path.exists("brand_photo.jpg"):
+                img_for_pdf = Image.open("brand_photo.jpg")
+            if st.button("🧾 Generate PDF"):
+                pdf_bytes = make_pdf_bytes(data, img_for_pdf, PRIMARY)
+                st.download_button("⬇️ Download PDF Report", data=pdf_bytes,
+                                   file_name="dna_report.pdf", mime="application/pdf")
+        else:
+            st.info("PDF export is unavailable because ReportLab is not installed in this environment. "
+                    "Use the JSON download above, or install ReportLab to enable PDF.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
@@ -712,5 +725,6 @@ with tab_about:
     else:
         st.caption("Use the sidebar to generate a QR code to your WhatsApp or website.")
 
-# Footer note
-st.caption("© {} {} • For education and demonstrations; not a clinical diagnostic.".format(datetime.datetime.now().year, brand))
+# Footer
+st.caption("© {} {} • For education and demonstrations; not a clinical diagnostic."
+           .format(datetime.datetime.now().year, brand))
